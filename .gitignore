@@ -1,0 +1,22 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio / Rider / Zed
+.vs/
+*.user
+*.suo
+.idea/
+
+# Environment & secrets
+appsettings.Development.json
+*.env
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
