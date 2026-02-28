@@ -7,6 +7,7 @@ using System.Security.Claims;
 using System.Text;
 using OpeningNight.Api.Data;
 using OpeningNight.Api.Models;
+using System.Net;
 
 namespace OpeningNight.Api.Controllers;
 
@@ -16,11 +17,13 @@ public class AuthController : ControllerBase
 {
     private readonly MovieClubContext _context;
     private readonly IConfiguration _configuration;
+    private readonly Authorization _authorization;
 
-    public AuthController(MovieClubContext context, IConfiguration configuration)
+    public AuthController(MovieClubContext context, IConfiguration configuration, Authorization authorization)
     {
         _context = context;
         _configuration = configuration;
+        _authorization = authorization;
     }
 
     [HttpPost("register")]
@@ -63,6 +66,10 @@ public class AuthController : ControllerBase
         var token = GenerateJwtToken(user);
         return Ok(new { user.Id, user.Username, user.Email, token });
     }
+    [HttpPost("group")]
+    [HttpPut("group")]
+    [HttpGet("group")]
+    [HttpDelete("group")]
     private string GenerateJwtToken(User user)
     {
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:SecretKey"]!));
