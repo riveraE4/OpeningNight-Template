@@ -4,9 +4,11 @@ using Microsoft.IdentityModel.Tokens;
 using OpeningNight.Api.Data;
 using OpeningNight.Api.Middleware;
 using OpeningNight.Api.Services;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
+builder.Services.AddMemoryCache(); // Register MemoryCache
 builder.Services.AddDbContext<MovieClubContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
@@ -47,6 +49,26 @@ builder.Services.AddHttpClient<TmdbService>(client =>
         builder.Configuration["Tmdb:BaseUrl"] ?? "https://api.themoviedb.org/3/");
 });
 
+// Rate Limiting
+builder.Services.AddRateLimiter(options =>
+{
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: partition => new FixedWindowRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                PermitLimit = 100, // 100 requests
+                QueueLimit = 0,
+                Window = TimeSpan.FromSeconds(10) // per 10 seconds
+            }));
+    options.RejectionStatusCode = 429;
+});
+
+// Health Checks
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<MovieClubContext>();
+
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -62,7 +84,9 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 app.UseCors("AllowFrontend");
+app.UseRateLimiter(); // Enable rate limiting
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
+app.MapHealthChecks("/health"); // Expose health endpoint
 app.Run();

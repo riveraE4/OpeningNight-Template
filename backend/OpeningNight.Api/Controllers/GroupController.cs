@@ -184,10 +184,59 @@ public class GroupController : ControllerBase
         if (group.CreatedBy != userId)
             return Forbid();
 
-        _context.Groups.Remove(group);
+        group.IsDeleted = true;
+        group.UpdatedAt = DateTime.UtcNow;
         await _context.SaveChangesAsync();
 
         return NoContent();
+    }
+
+    /// <summary>Search for groups by name or description (paginated).</summary>
+    [HttpGet("search")]
+    public async Task<IActionResult> Search([FromQuery] string q, [FromQuery] int page = 1, [FromQuery] int pageSize = 20)
+    {
+        if (string.IsNullOrWhiteSpace(q))
+            return BadRequest("Search query is required");
+
+        if (page < 1) page = 1;
+        if (pageSize < 1) pageSize = 1;
+        if (pageSize > 50) pageSize = 50;
+
+        var searchPattern = $"%{q}%";
+
+        var query = _context.Groups
+            .Where(g => !g.IsPrivate && 
+                       (EF.Functions.ILike(g.Name, searchPattern) || 
+                        (g.Description != null && EF.Functions.ILike(g.Description, searchPattern))))
+            .Include(g => g.Members)
+            .AsQueryable();
+
+        var totalCount = await query.CountAsync();
+
+        var groups = await query
+            .OrderByDescending(g => g.CreatedAt)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(g => new GroupResponseDto
+            {
+                Id = g.Id,
+                Name = g.Name,
+                Description = g.Description,
+                BannerUrl = g.BannerUrl,
+                IsPrivate = g.IsPrivate,
+                CreatedBy = g.CreatedBy,
+                CreatedAt = g.CreatedAt,
+                MemberCount = g.Members.Count
+            })
+            .ToListAsync();
+
+        return Ok(new PaginatedResponse<GroupResponseDto>
+        {
+            Items = groups,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount
+        });
     }
 
     /// <summary>Join a group.</summary>

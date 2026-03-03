@@ -7,6 +7,7 @@ public class Group
     public string? Description { get; set; }
     public string? BannerUrl { get; set; }
     public bool IsPrivate { get; set; } = false;
+    public bool IsDeleted { get; set; } = false;
     public int CreatedBy { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;

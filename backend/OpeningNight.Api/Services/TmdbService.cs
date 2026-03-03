@@ -1,19 +1,22 @@
 using System.Text.Json;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace OpeningNight.Api.Services;
 
 public class TmdbService
 {
     private readonly HttpClient _httpClient;
+    private readonly IMemoryCache _cache;
     private readonly string _apiKey;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
     };
 
-    public TmdbService(HttpClient httpClient, IConfiguration configuration)
+    public TmdbService(HttpClient httpClient, IMemoryCache cache, IConfiguration configuration)
     {
         _httpClient = httpClient;
+        _cache = cache;
         _apiKey = configuration["Tmdb:ApiKey"]!;
     }
 
@@ -82,14 +85,24 @@ public class TmdbService
 
     private async Task<JsonElement> GetAsync(string endpoint)
     {
-        // Add API key separator
-        var separator = endpoint.Contains('?') ? '&' : '?';
-        var url = $"{endpoint}{separator}api_key={_apiKey}&language=en-US";
+        // Use the endpoint string as the cache key.
+        // E.g., "trending/movie/day" or "search/movie?query=inception"
+        var cacheKey = $"tmdb_{endpoint}";
 
-        var response = await _httpClient.GetAsync(url);
-        response.EnsureSuccessStatusCode();
+        return await _cache.GetOrCreateAsync(cacheKey, async entry =>
+        {
+            // Set cache duration to 6 hours
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(6);
 
-        var json = await response.Content.ReadAsStringAsync();
-        return JsonSerializer.Deserialize<JsonElement>(json);
+            // Add API key separator
+            var separator = endpoint.Contains('?') ? '&' : '?';
+            var url = $"{endpoint}{separator}api_key={_apiKey}&language=en-US";
+
+            var response = await _httpClient.GetAsync(url);
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync();
+            return JsonSerializer.Deserialize<JsonElement>(json);
+        });
     }
 }

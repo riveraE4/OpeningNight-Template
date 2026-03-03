@@ -23,6 +23,9 @@ public class MovieClubContext : DbContext
 
         modelBuilder.Entity<GroupMember>()
             .HasKey(x => new { x.GroupId, x.UserId });
+
+        modelBuilder.Entity<Group>()
+            .HasQueryFilter(g => !g.IsDeleted);
     }
 
 }
