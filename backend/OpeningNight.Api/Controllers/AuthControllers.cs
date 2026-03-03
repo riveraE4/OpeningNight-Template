@@ -1,13 +1,10 @@
-using Microsoft.AspNetCore.Identity.Data;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
-using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
-using System.Text;
 using OpeningNight.Api.Data;
+using OpeningNight.Api.DTOs;
 using OpeningNight.Api.Models;
-using System.Net;
 
 namespace OpeningNight.Api.Controllers;
 
@@ -16,92 +13,121 @@ namespace OpeningNight.Api.Controllers;
 public class AuthController : ControllerBase
 {
     private readonly MovieClubContext _context;
-    private readonly IConfiguration _configuration;
-    private readonly Authorization _authorization;
 
-    public AuthController(MovieClubContext context, IConfiguration configuration, Authorization authorization)
+    public AuthController(MovieClubContext context)
     {
         _context = context;
-        _configuration = configuration;
-        _authorization = authorization;
     }
 
-    [HttpPost("register")]
-    public async Task<IActionResult> Register([FromBody] RegisterRequest request)
+    /// <summary>
+    /// Sync the authenticated Auth0 user with the local database.
+    /// Call this from the frontend after a successful Auth0 login.
+    /// Creates the user if they don't exist, or returns the existing record.
+    /// </summary>
+    [Authorize]
+    [HttpPost("sync")]
+    public async Task<IActionResult> Sync()
     {
-        // does the email already exist?
-        if (await _context.Users.AnyAsync(u => u.Email == request.Email))
-            return BadRequest("Email is already in use");
-        // check if the username already exists
-        if (await _context.Users.AnyAsync(u => u.Username == request.Username))
-            return BadRequest("Username already taken");
+        var auth0Id = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var email = User.FindFirstValue(ClaimTypes.Email)
+                    ?? User.FindFirstValue("email");
+        var name = User.FindFirstValue(ClaimTypes.Name)
+                   ?? User.FindFirstValue("name")
+                   ?? User.FindFirstValue("nickname");
 
-        var user = new User
+        if (string.IsNullOrEmpty(auth0Id))
+            return Unauthorized("Missing user identifier in token");
+
+        // Try to find existing user by Auth0 ID (stored in OAuth connections)
+        var oauthConnection = await _context.UserOAuths
+            .Include(o => o.User)
+            .FirstOrDefaultAsync(o => o.Provider == "auth0" && o.ProviderUserId == auth0Id);
+
+        if (oauthConnection != null)
         {
-            Username = request.Username,
-            Email = request.Email,
-            PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
+            // User exists — update last login info
+            var existingUser = oauthConnection.User;
+            existingUser.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            return Ok(new UserResponseDto
+            {
+                Id = existingUser.Id,
+                Username = existingUser.Username,
+                Email = existingUser.Email,
+                AvatarUrl = existingUser.AvatarUrl,
+                Bio = existingUser.Bio
+            });
+        }
+
+        // Check if a user with this email already exists (migrated from old JWT auth)
+        User? user = null;
+        if (!string.IsNullOrEmpty(email))
+        {
+            user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+        }
+
+        if (user == null)
+        {
+            // Brand new user — create them
+            user = new User
+            {
+                Username = name ?? email?.Split('@')[0] ?? "user",
+                Email = email ?? "",
+                PasswordHash = null, // Auth0 handles passwords
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            };
+
+            _context.Users.Add(user);
+            await _context.SaveChangesAsync();
+        }
+
+        // Link Auth0 identity to local user
+        var newOAuth = new UserOAuth
+        {
+            UserId = user.Id,
+            Provider = "auth0",
+            ProviderUserId = auth0Id,
+            CreatedAt = DateTime.UtcNow
         };
 
-        _context.Users.Add(user);
+        _context.UserOAuths.Add(newOAuth);
         await _context.SaveChangesAsync();
 
-        return Ok(new { user.Id, user.Username, user.Email });
-
-    }
-    [HttpPost("login")]
-    public async Task<IActionResult> Login([FromBody] LoginRequest request)
-    {
-        // this finds the user by email
-        var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == request.Email);
-        // when the user is not found this will return a 401 error
-        if (user == null)
-            return Unauthorized("Invalid email or password");
-        // this will verify the password and return the right response
-        var passwordMatch = BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash);
-        if (!passwordMatch)
-            return Unauthorized("Invalid email or password");
-        var token = GenerateJwtToken(user);
-        return Ok(new { user.Id, user.Username, user.Email, token });
-    }
-    [HttpPost("group")]
-    [HttpPut("group")]
-    [HttpGet("group")]
-    [HttpDelete("group")]
-    private string GenerateJwtToken(User user)
-    {
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:SecretKey"]!));
-        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-        var claims = new[]
+        return Ok(new UserResponseDto
         {
-            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
-            new Claim(ClaimTypes.Email, user.Email),
-            new Claim(ClaimTypes.Name, user.Username)
-        };
-        var token = new JwtSecurityToken(
-            issuer: _configuration["Jwt:Issuer"],
-            audience: _configuration["Jwt:Audience"],
-            claims: claims,
-            expires: DateTime.UtcNow.AddDays(int.Parse(_configuration["Jwt:ExpiryInDays"]!)),
-            signingCredentials: credentials
-        );
-
-        return new JwtSecurityTokenHandler().WriteToken(token);
+            Id = user.Id,
+            Username = user.Username,
+            Email = user.Email,
+            AvatarUrl = user.AvatarUrl,
+            Bio = user.Bio
+        });
     }
-}
 
-public class RegisterRequest
-{
-    public string Username { get; set; } = null!;
-    public string Email { get; set; } = null!;
-    public string Password { get; set; } = null!;
-}
+    /// <summary>Get the current authenticated user's profile.</summary>
+    [Authorize]
+    [HttpGet("me")]
+    public async Task<IActionResult> Me()
+    {
+        var auth0Id = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
-public class LoginRequest
-{
-    public string Email { get; set; } = null!;
-    public string Password { get; set; } = null!;
+        var oauthConnection = await _context.UserOAuths
+            .Include(o => o.User)
+            .FirstOrDefaultAsync(o => o.Provider == "auth0" && o.ProviderUserId == auth0Id);
+
+        if (oauthConnection == null)
+            return NotFound("User not synced. Call POST /api/auth/sync first.");
+
+        var user = oauthConnection.User;
+
+        return Ok(new UserResponseDto
+        {
+            Id = user.Id,
+            Username = user.Username,
+            Email = user.Email,
+            AvatarUrl = user.AvatarUrl,
+            Bio = user.Bio
+        });
+    }
 }
